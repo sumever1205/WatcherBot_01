@@ -284,7 +284,7 @@ init_symbols()
 schedule.every(5).minutes.do(check_price_change)
 schedule.every(15).minutes.do(update_price_15min_ago)
 schedule.every().hour.at(":00").do(check_new_all_contracts)
-schedule.every().day.at("08:00").do(check_daily_top_movers)
+schedule.every().day.at("00:00").do(check_daily_top_movers)
 
 print("✅ 系統已啟動，開始監控...\n")
 
