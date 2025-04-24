@@ -5,6 +5,7 @@ import json
 import os
 from datetime import datetime
 from collections import defaultdict
+from pytz import timezone
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -155,13 +156,42 @@ def check_telegram_commands():
                 print(f"⚠️ 忽略來自未授權 chat_id：{chat_id}")
                 continue
 
-            if text.strip().lower() == "/top":
-                print(f"📩 收到 /top 指令，回覆榜單")
+            if text.strip().lower() == "/t":
+                print(f"📩 收到 /t 指令，回覆榜單")
                 msg = get_top_movers_text()
+                send_telegram_message(msg, chat_id=chat_id)
+
+            elif text.strip().lower() == "/5":
+                print("📩 收到 /5 指令，回傳 5 分鐘紀錄")
+                parts = load_price_spike_log("5")
+                msg = "🕔 5分鐘漲幅紀錄\n\n"
+                for source, records in parts:
+                    msg += f"📍 {source}：\n"
+                    if records:
+                        msg += "\n".join([f"- {r['symbol']} @ {r['datetime']}" for r in records]) + "\n\n"
+                    else:
+                        msg += "（無紀錄）\n\n"
+                send_telegram_message(msg.strip(), chat_id=chat_id)
+
+            elif text.strip().lower() == "/15":
+                print("📩 收到 /15 指令，回傳 15 分鐘紀錄")
+                parts = load_price_spike_log("15")
+                msg = "🕒 15分鐘漲幅紀錄\n\n"
+                for source, records in parts:
+                    msg += f"📍 {source}：\n"
+                    if records:
+                        msg += "\n".join([f"- {r['symbol']} @ {r['datetime']}" for r in records]) + "\n\n"
+                    else:
+                        msg += "（無紀錄）\n\n"
+                send_telegram_message(msg.strip(), chat_id=chat_id)
+            elif text.strip().lower() == "/f":
+                print("📩 收到 /f 指令，回傳資金費率排行榜")
+                msg = get_funding_rate_ranking_text()
                 send_telegram_message(msg, chat_id=chat_id)
 
     except Exception as e:
         print("❗ 檢查指令錯誤：", e)
+
 def update_price_15min_ago():
     print(f"[{datetime.now()}] 🔁 更新 15 分鐘前價格...")
     try:
@@ -200,9 +230,11 @@ def check_price_change():
         old_5 = price_5min_ago.get(f"binance_{symbol}", 0)
         if old_5 > 0 and (price - old_5) / old_5 * 100 >= 5:
             binance_5m.append(f"{short} +{(price - old_5) / old_5 * 100:.2f}%")
+            save_price_spike_log("binance", "5", short)
         old_15 = price_15min_ago.get(f"binance_{symbol}", 0)
         if old_15 > 0 and (price - old_15) / old_15 * 100 >= 5:
             binance_15m.append(f"{short} +{(price - old_15) / old_15 * 100:.2f}%")
+            save_price_spike_log("binance", "15", short)
         price_5min_ago[f"binance_{symbol}"] = price
 
     try:
@@ -218,9 +250,11 @@ def check_price_change():
         old_5 = price_5min_ago.get(f"bybit_{symbol}", 0)
         if old_5 > 0 and (price - old_5) / old_5 * 100 >= 5:
             bybit_5m.append(f"{short} +{(price - old_5) / old_5 * 100:.2f}%")
+            save_price_spike_log("bybit", "5", short)
         old_15 = price_15min_ago.get(f"bybit_{symbol}", 0)
         if old_15 > 0 and (price - old_15) / old_15 * 100 >= 5:
             bybit_15m.append(f"{short} +{(price - old_15) / old_15 * 100:.2f}%")
+            save_price_spike_log("bybit", "15", short)
         price_5min_ago[f"bybit_{symbol}"] = price
 
     if TEST_MODE:
@@ -242,6 +276,7 @@ def check_price_change():
         print("✅ 已發送通知")
     else:
         print("ℹ️ 沒有符合條件的交易對")
+
 def detect_new_contracts(file, new_list, source_name):
     def load_symbols(file):
         if os.path.exists(file):
@@ -278,6 +313,86 @@ def check_new_all_contracts():
         detect_new_contracts(UPBIT_SYMBOL_FILE, get_upbit_krw_symbols(), "Upbit (KRW 現貨)")
     except Exception as e:
         print("❗ 新合約偵測錯誤：", e)
+LOG_FILES = {
+    "binance_5": "binance_5min_log.json",
+    "binance_15": "binance_15min_log.json",
+    "bybit_5": "bybit_5min_log.json",
+    "bybit_15": "bybit_15min_log.json"
+}
+
+def save_price_spike_log(source, interval, symbol):
+    key = f"{source}_{interval}"
+    file = LOG_FILES.get(key)
+    if not file:
+        return
+
+    now = datetime.now(timezone("Asia/Taipei")).strftime("%Y-%m-%d %H:%M")
+
+    if os.path.exists(file):
+        with open(file, "r") as f:
+            data = json.load(f)
+    else:
+        data = []
+
+    # 如果已有 symbol 紀錄，略過
+    for entry in data:
+        if entry["symbol"] == symbol:
+            return
+
+    data.insert(0, {"symbol": symbol, "datetime": now})
+    data = data[:30]
+
+    with open(file, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def load_price_spike_log(interval):
+    result = []
+    for source in ["binance", "bybit"]:
+        key = f"{source}_{interval}"
+        file = LOG_FILES.get(key)
+        if os.path.exists(file):
+            with open(file, "r") as f:
+                data = json.load(f)
+            result.append((source.capitalize(), data))
+        else:
+            result.append((source.capitalize(), []))
+    return result
+def get_funding_rate_ranking_text():
+    def fetch_binance_funding():
+        try:
+            url = "https://fapi.binance.com/fapi/v1/premiumIndex"
+            res = requests.get(url).json()
+            return {
+                item["symbol"]: float(item["lastFundingRate"]) * 100
+                for item in res
+                if item["symbol"].endswith("USDT")
+            }
+        except Exception as e:
+            print("❗ Binance 資金費率錯誤：", e)
+            return {}
+
+    def format_rate(rank_data, title):
+        lines = [title]
+        for i, (symbol, rate) in enumerate(rank_data, start=1):
+            pct = f"{rate:.4f}%"
+            if rate > 0:
+                pct = f"+{pct}"
+            lines.append(f"{i}. {symbol.replace('USDT','')} {pct}")
+        return "\n".join(lines)
+
+    binance_data = fetch_binance_funding()
+
+    def sort_and_split(data):
+        items = sorted(data.items(), key=lambda x: x[1], reverse=True)
+        return items[:10], sorted(items[-10:], key=lambda x: x[1])
+
+    b_top, b_bottom = sort_and_split(binance_data)
+
+    return (
+        format_rate(b_top, "📈 Binance 資金費率 Top 10") + "\n\n" +
+        format_rate(b_bottom, "📉 Binance 資金費率 Bottom 10")
+    )
+
 
 # ✅ 初始化與排程
 init_symbols()
